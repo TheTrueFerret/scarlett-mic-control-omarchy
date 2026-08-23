@@ -11,6 +11,8 @@ are easy to confuse:
 Normal speakers, headphones, Bluetooth devices, and application routing remain
 under Omarchy's built-in audio widget.
 
+![Scarlett Mic Control panel in the Omarchy bar](assets/scarlett-mic-control.png)
+
 ## Install
 
 ```bash
