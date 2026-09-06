@@ -15,7 +15,7 @@ Item {
   property string monitorDevice: "Scarlett interface"
   property string message: ""
   property string lastError: ""
-  property var pendingCommand: null
+  property var queue: []
 
   readonly property bool busy: helper.running
   readonly property string helperPath: decodeURIComponent(
@@ -45,17 +45,38 @@ Item {
     }
   }
 
-  function run(args) {
-    var command = ["python3", helperPath].concat(args)
-    if (helper.running) {
-      pendingCommand = command
-      return
-    }
-    helper.command = command
-    helper.running = true
+  function statusJson() {
+    return JSON.stringify({
+      micAvailable: micAvailable, micMuted: micMuted, micDevice: micDevice,
+      monitorAvailable: monitorAvailable, monitorEnabled: monitorEnabled,
+      monitorVolume: monitorVolume, monitorDevice: monitorDevice,
+      message: message, error: lastError
+    })
   }
 
-  function refresh() { run(["status"]) }
+  function run(args) {
+    if (!helper.running) {
+      helper.command = ["python3", helperPath].concat(args)
+      helper.running = true
+      return
+    }
+    // Only polls and volume drags collapse into the queued command; a discrete
+    // toggle must never be dropped because another command was still running.
+    var pending = queue.slice()
+    var last = pending.length ? pending[pending.length - 1] : null
+    if (last && last[0] === args[0] && (args[0] === "status" || args[0] === "monitor-volume"))
+      pending[pending.length - 1] = args
+    else
+      pending.push(args)
+    queue = pending
+  }
+
+  function refresh() {
+    // Every command answers with fresh status, so a poll behind a queued
+    // command is redundant.
+    if (helper.running && queue.length > 0) return
+    run(["status"])
+  }
   function toggleMic() { run(["mic-toggle"]) }
   function toggleMonitor() { run(["monitor-toggle"]) }
   function setMonitorVolume(percent) { run(["monitor-volume", String(Math.round(percent))]) }
@@ -75,10 +96,11 @@ Item {
     }
     onExited: function(exitCode) {
       if (exitCode !== 0 && !root.lastError) root.lastError = "Microphone command failed"
-      if (root.pendingCommand) {
-        var next = root.pendingCommand
-        root.pendingCommand = null
-        helper.command = next
+      if (root.queue.length > 0) {
+        var pending = root.queue.slice()
+        var next = pending.shift()
+        root.queue = pending
+        helper.command = ["python3", root.helperPath].concat(next)
         helper.running = true
       }
     }
@@ -93,20 +115,4 @@ Item {
   }
 
   Component.onCompleted: refresh()
-
-  IpcHandler {
-    target: "scarlett-mic-control"
-    function refresh(): void { root.refresh() }
-    function status(): string {
-      return JSON.stringify({
-        micAvailable: root.micAvailable, micMuted: root.micMuted, micDevice: root.micDevice,
-        monitorAvailable: root.monitorAvailable, monitorEnabled: root.monitorEnabled,
-        monitorVolume: root.monitorVolume, monitorDevice: root.monitorDevice,
-        message: root.message, error: root.lastError
-      })
-    }
-    function toggleMic(): void { root.toggleMic() }
-    function toggleMonitor(): void { root.toggleMonitor() }
-    function monitorVolume(percent: int): void { root.setMonitorVolume(percent) }
-  }
 }

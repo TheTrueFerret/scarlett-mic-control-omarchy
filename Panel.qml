@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
@@ -35,6 +36,21 @@ Panel {
     focusRow = 0
     if (service) service.refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  IpcHandler {
+    target: root.ipcTarget
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): void { if (root.service) root.service.refresh() }
+    function status(): string { return root.service ? root.service.statusJson() : "" }
+    function toggleMic(): void { if (root.service) root.service.toggleMic() }
+    function toggleMonitor(): void { if (root.service) root.service.toggleMonitor() }
+    function monitorVolume(percent: int): void { if (root.service) root.service.setMonitorVolume(percent) }
   }
 
   BarIconButton {

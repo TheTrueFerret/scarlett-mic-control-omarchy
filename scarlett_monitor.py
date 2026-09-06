@@ -29,10 +29,10 @@ def config_path() -> Path:
 def load_config() -> dict[str, Any]:
     try:
         value = json.loads(config_path().read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    except (OSError, json.JSONDecodeError):
+        # A missing, unreadable, or hand-edited preferences file must never take
+        # the controls down with it; the next successful write replaces it.
         return {"version": 1, "last_monitor_volume": 75}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MonitorError(f"Could not read monitor settings: {exc}") from exc
     if not isinstance(value, dict):
         return {"version": 1, "last_monitor_volume": 75}
     try:
@@ -105,8 +105,8 @@ def source_label(source: dict[str, Any]) -> str:
     )
 
 
-def find_scarlett_mic() -> dict[str, Any] | None:
-    sources = scarlett_sources()
+def find_scarlett_mic(sources: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    sources = scarlett_sources() if sources is None else sources
     if not sources:
         return None
     try:
@@ -131,8 +131,8 @@ def mixer_value(card: str, control: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def find_hardware_monitor() -> dict[str, Any] | None:
-    for source in scarlett_sources():
+def find_hardware_monitor(sources: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    for source in (scarlett_sources() if sources is None else sources):
         card = str(source_properties(source).get("alsa.id") or "")
         if not card:
             continue
@@ -151,8 +151,10 @@ def set_raw_monitor_level(card: str, value: int) -> None:
 
 
 def status() -> dict[str, Any]:
-    mic = find_scarlett_mic()
-    monitor = find_hardware_monitor()
+    # One source listing feeds both lookups; this runs on every poll.
+    sources = scarlett_sources()
+    mic = find_scarlett_mic(sources)
+    monitor = find_hardware_monitor(sources)
     level = max(int(monitor["left"]), int(monitor["right"])) if monitor else 0
     return {
         "ok": True,

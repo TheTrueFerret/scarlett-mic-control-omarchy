@@ -41,6 +41,21 @@ The panel uses separate switches so muting yourself for a call never silently
 changes what you hear in the headphones, and disabling monitoring never mutes
 the recording source.
 
+## Scripting
+
+Every control is reachable over the shell IPC route named after the plugin id,
+so it can be bound to a hotkey in `~/.config/hypr/bindings.lua`:
+
+```bash
+omarchy-shell io.github.thetrueferret.scarlett-mic-control toggleMic
+omarchy-shell io.github.thetrueferret.scarlett-mic-control toggleMonitor
+omarchy-shell io.github.thetrueferret.scarlett-mic-control monitorVolume 60
+omarchy-shell io.github.thetrueferret.scarlett-mic-control status
+omarchy-shell io.github.thetrueferret.scarlett-mic-control toggle
+```
+
+`toggle`, `open`, and `close` control the panel; `status` returns JSON.
+
 ## Compatibility
 
 ### Microphone mute
@@ -60,6 +75,10 @@ enabled only when ALSA exposes both of these mixer controls:
 Mix E Input 01
 Mix F Input 01
 ```
+
+The monitor percentage is scaled against unity gain, so 100% is 0 dB rather
+than the interface's maximum boost. `alsamixer` reports the same level as a
+percentage of the full control range and therefore shows a lower number.
 
 On another Scarlett model, microphone mute can still work even if **Hear
 myself** is shown as unavailable. The plugin deliberately avoids guessing at
