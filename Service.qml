@@ -13,6 +13,12 @@ Item {
   property bool monitorEnabled: false
   property int monitorVolume: 0
   property string monitorDevice: "Scarlett interface"
+  property bool routingAvailable: false
+  property var routing: []
+  property var presets: []
+  property string presetsDir: ""
+  property bool mixerAppInstalled: false
+  property bool mixerAppInstallable: false
   property string message: ""
   property string lastError: ""
   property var queue: []
@@ -38,6 +44,15 @@ Item {
       monitorEnabled = data.monitor_enabled === true
       monitorVolume = Math.max(0, Math.min(100, Number(data.monitor_volume || 0)))
       monitorDevice = String(data.monitor_device || "Scarlett interface")
+      routingAvailable = data.routing_available === true
+      // Polls repeat the same routing; reassigning would rebuild every chip.
+      var nextRouting = Array.isArray(data.routing) ? data.routing : []
+      if (JSON.stringify(nextRouting) !== JSON.stringify(routing)) routing = nextRouting
+      var nextPresets = Array.isArray(data.presets) ? data.presets : []
+      if (JSON.stringify(nextPresets) !== JSON.stringify(presets)) presets = nextPresets
+      presetsDir = String(data.presets_dir || "")
+      mixerAppInstalled = data.mixer_app_installed === true
+      mixerAppInstallable = data.mixer_app_installable === true
       message = String(data.message || "")
       lastError = ""
     } catch (error) {
@@ -50,6 +65,8 @@ Item {
       micAvailable: micAvailable, micMuted: micMuted, micDevice: micDevice,
       monitorAvailable: monitorAvailable, monitorEnabled: monitorEnabled,
       monitorVolume: monitorVolume, monitorDevice: monitorDevice,
+      routingAvailable: routingAvailable, routing: routing, presets: presets,
+      mixerAppInstalled: mixerAppInstalled,
       message: message, error: lastError
     })
   }
@@ -80,6 +97,24 @@ Item {
   function toggleMic() { run(["mic-toggle"]) }
   function toggleMonitor() { run(["monitor-toggle"]) }
   function setMonitorVolume(percent) { run(["monitor-volume", String(Math.round(percent))]) }
+  function applyPreset(name) { run(["preset-apply", String(name)]) }
+  function savePreset(name) { run(["preset-save", String(name)]) }
+
+  // ALSA Scarlett Control Panel owns the full routing matrix; focus it when it
+  // is already open rather than stacking a second window.
+  function openMixerApp() {
+    if (!mixerAppInstalled) return
+    Quickshell.execDetached(["omarchy-launch-or-focus", "alsa-scarlett-gui", "uwsm-app -- alsa-scarlett-gui"])
+  }
+
+  // Installing needs sudo, so it runs in a visible terminal where the user
+  // confirms it; the next poll picks the app up.
+  function installMixerApp() {
+    if (mixerAppInstalled || !mixerAppInstallable) return
+    Quickshell.execDetached([
+      "omarchy-launch-floating-terminal-with-presentation", "omarchy-pkg-add alsa-scarlett-gui"
+    ])
+  }
 
   Process {
     id: helper

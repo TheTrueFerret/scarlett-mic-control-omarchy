@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.thetrueferret.scarlett-mic-control",
   "name": "Scarlett Mic Control",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "TheTrueFerret",
   "license": "MIT",
-  "description": "Mute a Scarlett microphone and independently control compatible zero-latency headphone monitoring.",
+  "description": "Mute a Scarlett microphone, control zero-latency headphone monitoring, see the interface routing, and switch routing presets.",
   "kinds": [
     "service",
     "bar-widget"
@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "Scarlett Mic Control",
-    "description": "Control what applications hear and what you hear in Scarlett headphones.",
+    "description": "Control what applications hear, what you hear in Scarlett headphones, and how the interface is routed.",
     "category": "Audio",
     "allowMultiple": false,
     "defaultSection": "right"
