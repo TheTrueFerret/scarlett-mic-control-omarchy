@@ -128,7 +128,28 @@ Panel {
     var row = visibleRoutes.filter(function(item) { return item.key === key })[0]
     if (row) {
       for (var i = 0; i < row.choices.length; i++) if (row.choices[i].current) choiceCursor = i
-      focusRow = firstRouteRow + visibleRoutes.indexOf(row)
+      focusRow = routeCursorRow(key)
+    }
+  }
+
+  // Looked up by key: every read of a JS-array property hands back fresh
+  // copies, so indexOf on the row objects never matches.
+  function routeCursorRow(key) {
+    var routes = visibleRoutes
+    for (var i = 0; i < routes.length; i++) if (routes[i].key === key) return firstRouteRow + i
+    return -1
+  }
+
+  // Hovering moves the cursor to that one item; leaving it clears the
+  // highlight again unless the keyboard is driving the cursor.
+  function hoverRow(row, inside, choice) {
+    var index = choice === undefined ? -1 : choice
+    if (inside) {
+      cursorActive = true
+      focusRow = row
+      if (index >= 0) choiceCursor = index
+    } else if (!keyboardUsed && focusRow === row && (index < 0 || choiceCursor === index)) {
+      cursorActive = false
     }
   }
 
@@ -439,10 +460,7 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onContainsMouseChanged: if (containsMouse) {
-                  root.cursorActive = true
-                  root.focusRow = root.showAllRow
-                }
+                onContainsMouseChanged: root.hoverRow(root.showAllRow, containsMouse)
                 onClicked: root.toggleShowAll()
               }
             }
@@ -649,7 +667,7 @@ Panel {
       Column {
         id: routeRow
         required property var modelData
-        readonly property int cursorIndex: root.firstRouteRow + root.visibleRoutes.indexOf(modelData)
+        readonly property int cursorIndex: root.routeCursorRow(modelData.key)
         readonly property bool onCursor: root.cursorActive && root.focusRow === cursorIndex
         readonly property bool expanded: root.expandedRoute === modelData.key
         readonly property bool changeable: (modelData.choices || []).length > 0
@@ -725,10 +743,7 @@ Panel {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: routeRow.changeable ? Qt.PointingHandCursor : Qt.ArrowCursor
-            onContainsMouseChanged: if (containsMouse) {
-              root.cursorActive = true
-              root.focusRow = routeRow.cursorIndex
-            }
+            onContainsMouseChanged: root.hoverRow(routeRow.cursorIndex, containsMouse)
             onClicked: if (routeRow.changeable) root.toggleRoute(routeRow.modelData.key)
           }
 
@@ -785,11 +800,7 @@ Panel {
                     label: modelData.choice.label
                     current: modelData.choice.current
                     hasCursor: routeRow.onCursor && root.choiceCursor === modelData.index
-                    onHovered: {
-                      root.cursorActive = true
-                      root.focusRow = routeRow.cursorIndex
-                      root.choiceCursor = modelData.index
-                    }
+                    onHovered: function(inside) { root.hoverRow(routeRow.cursorIndex, inside, modelData.index) }
                     onClicked: root.chooseRoute(routeRow.modelData.key, modelData.choice)
                   }
                 }
@@ -805,7 +816,7 @@ Panel {
     id: pill
     property string label: ""
     signal clicked()
-    signal hovered()
+    signal hovered(bool inside)
 
     foreground: root.foreground
     // A faint fill instead of borders keeps a long list of choices quiet.
@@ -827,7 +838,7 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onContainsMouseChanged: if (containsMouse) pill.hovered()
+      onContainsMouseChanged: pill.hovered(containsMouse)
       onClicked: pill.clicked()
     }
   }
