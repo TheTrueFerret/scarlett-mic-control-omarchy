@@ -15,6 +15,9 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property bool cursorActive: false
+  // Key hints only appear once the keyboard is used; hovering also moves the
+  // cursor so there is never more than one highlight.
+  property bool keyboardUsed: false
   property int focusRow: 0
   property bool savingPreset: false
   property string expandedRoute: ""
@@ -32,21 +35,24 @@ Panel {
     return shown.filter(function(row) { return row.section === "hear" })
       .concat(shown.filter(function(row) { return row.section === "record" }))
   }
-  // Cursor rows: 0 microphone, 1 hear myself, 2 mixer app, 3 show all, one
-  // per visible route, save preset, then one per preset.
-  readonly property int firstRouteRow: 4
-  readonly property int saveRow: firstRouteRow + (routingAvailable ? visibleRoutes.length : 0)
+  readonly property int hiddenRoutes: (service ? service.routing.length : 0) - visibleRoutes.length
+  readonly property bool canShowAll: routingAvailable && (showAllRoutes || hiddenRoutes > 0)
+  // Cursor rows: 0 microphone, 1 hear myself, 2 mixer app, one per visible
+  // route, show all, save preset, then one per preset.
+  readonly property int firstRouteRow: 3
+  readonly property int showAllRow: canShowAll ? firstRouteRow + visibleRoutes.length : -1
+  readonly property int saveRow: firstRouteRow + (routingAvailable ? visibleRoutes.length : 0) + (canShowAll ? 1 : 0)
   readonly property int firstPresetRow: saveRow + 1
   readonly property int lastRow: routingAvailable ? saveRow + presets.length : 2
-  readonly property var cursorRoute: focusRow >= firstRouteRow && focusRow < saveRow
+  readonly property var cursorRoute: focusRow >= firstRouteRow && focusRow < firstRouteRow + visibleRoutes.length
     ? visibleRoutes[focusRow - firstRouteRow] : null
-  readonly property int hiddenRoutes: (service ? service.routing.length : 0) - visibleRoutes.length
   readonly property var glyphs: ({
     "in": String.fromCodePoint(0xF036C), "pc": String.fromCodePoint(0xF0322),
     "spdif": String.fromCodePoint(0xF0200), "adat": String.fromCodePoint(0xF0200),
     "mix": String.fromCodePoint(0xF062E), "out": String.fromCodePoint(0xF057E),
     "phones": String.fromCodePoint(0xF02CB), "rec": String.fromCodePoint(0xF044A),
-    "from": String.fromCodePoint(0xF004D), "check": String.fromCodePoint(0xF012C)
+    "check": String.fromCodePoint(0xF012C),
+    "open": String.fromCodePoint(0xF0140), "closed": String.fromCodePoint(0xF0142)
   })
 
   implicitWidth: button.implicitWidth
@@ -63,8 +69,8 @@ Panel {
     if (focusRow === 0 && service.micAvailable) service.toggleMic()
     else if (focusRow === 1 && service.monitorAvailable) service.toggleMonitor()
     else if (focusRow === 2) activateMixerApp()
-    else if (focusRow === 3) toggleShowAll()
     else if (cursorRoute) activateRoute(cursorRoute)
+    else if (focusRow === showAllRow) toggleShowAll()
     else if (focusRow === saveRow) startSavingPreset()
     else if (focusRow >= firstPresetRow) applyPreset(focusRow - firstPresetRow)
   }
@@ -82,6 +88,7 @@ Panel {
 
   function moveCursor(dx, dy) {
     cursorActive = true
+    keyboardUsed = true
     confirmDelete = ""
     if (expandedRoute !== "" && cursorRoute && cursorRoute.key === expandedRoute && dx !== 0) {
       choiceCursor = Math.max(0, Math.min(cursorRoute.choices.length - 1, choiceCursor + dx))
@@ -109,7 +116,10 @@ Panel {
   function toggleShowAll() {
     if (!service || !routingAvailable) return
     expandedRoute = ""
+    var onToggle = focusRow === showAllRow
     service.setRoutingView(showAllRoutes ? "compact" : "all")
+    // The toggle moves as rows appear or disappear; keep the cursor on it.
+    if (onToggle) focusRow = showAllRow
   }
 
   function toggleRoute(key) {
@@ -162,30 +172,16 @@ Panel {
     else close()
   }
 
-  // The chain after a destination, read right to left as signal flow:
-  // the mix it plays (if any), then what that mix is made of.
-  function chainItems(row) {
-    var items = [{ role: "arrow" }]
-    if (row.off) return items.concat([{ role: "note", label: "Off" }])
-    if (row.same_as) {
-      return items.concat([
-        { role: "via", label: row.via, kind: "mix", hint: row.via_hint },
-        { role: "note", label: "same as " + row.same_as }
-      ])
-    }
-    if (row.via) {
-      items.push({ role: "via", label: row.via, kind: "mix", hint: row.via_hint })
-      items.push({ role: "arrow" })
-    }
-    var sources = row.sources || []
-    for (var i = 0; i < Math.min(sources.length, 4); i++)
-      items.push({ role: "source", label: sources[i].label, kind: sources[i].kind, db: sources[i].db, hint: sources[i].hint })
-    if (sources.length > 4) {
-      var rest = sources.slice(4).map(function(source) { return source.label }).join(", ")
-      items.push({ role: "note", label: "+" + (sources.length - 4) + " more", hint: rest })
-    }
-    if (sources.length === 0) items.push({ role: "note", label: "Silent", hint: "Nothing is mixed in" })
-    return items
+  // One line saying what a destination plays: its sources, then the mix
+  // they are blended in, e.g. "In 1 (DSP) −48 dB + PC 1–2 via Mix E–F".
+  function routeSummary(row) {
+    if (row.off) return "Off"
+    if (row.same_as) return "Same as " + row.same_as
+    var sources = (row.sources || []).map(function(source) {
+      return source.label + (source.db ? " " + (source.db > 0 ? "+" : "−") + Math.abs(source.db) + " dB" : "")
+    })
+    var text = sources.length ? sources.join(" + ") : "Silent"
+    return row.via ? text + " via " + row.via : text
   }
 
   // Choices grouped by kind, each remembering its place in the flat list
@@ -206,6 +202,7 @@ Panel {
 
   onOpenedChanged: if (opened) {
     cursorActive = false
+    keyboardUsed = false
     focusRow = 0
     savingPreset = false
     expandedRoute = ""
@@ -307,21 +304,13 @@ Panel {
             iconText: root.service && root.service.micMuted ? "󰍭" : "󰍬"
             title: "Microphone"
             subtitle: !root.service || !root.service.micAvailable ? "Scarlett input unavailable"
-              : (root.service.micMuted ? "Muted for applications and calls" : "Live to applications and calls")
+              : (root.service.micMuted ? "Muted for apps and calls" : "Live to apps and calls")
+                + (root.service.micDevice ? " · " + root.service.micDevice : "")
             checked: root.service ? root.service.micAvailable && !root.service.micMuted : false
             available: root.service ? root.service.micAvailable : false
             busy: root.service ? root.service.busy : false
             hasCursor: root.cursorActive && root.focusRow === 0
             onToggled: if (root.service) root.service.toggleMic()
-          }
-
-          Text {
-            width: parent.width
-            text: root.service ? root.service.micDevice : "Scarlett microphone"
-            color: Qt.darker(root.foreground, 1.5)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
           }
 
           PanelSeparator { foreground: root.foreground }
@@ -392,32 +381,19 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            Row {
+            SmallButton {
               id: routingActions
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(4)
-
-              SmallButton {
-                visible: root.routingAvailable && (root.showAllRoutes || root.hiddenRoutes > 0)
-                text: root.showAllRoutes ? "Show less" : "Show all (" + root.hiddenRoutes + ")"
-                tooltipText: root.showAllRoutes ? "Only show outputs in use"
-                  : "Also show what the computer records and unused outputs"
-                hasCursor: root.cursorActive && root.focusRow === 3
-                onClicked: root.toggleShowAll()
-              }
-
-              SmallButton {
-                visible: root.service ? root.service.mixerAppInstalled || root.service.mixerAppInstallable : false
-                text: root.service && root.service.mixerAppInstalled ? "Open mixer" : "Install mixer"
-                iconText: root.service && root.service.mixerAppInstalled
-                  ? String.fromCodePoint(0xF03CC) : String.fromCodePoint(0xF01DA)
-                tooltipText: root.service && root.service.mixerAppInstalled
-                  ? "Edit mixes and levels in ALSA Scarlett Control Panel"
-                  : "Install ALSA Scarlett Control Panel (alsa-scarlett-gui) in a terminal"
-                hasCursor: root.cursorActive && root.focusRow === 2
-                onClicked: root.activateMixerApp()
-              }
+              visible: root.service ? root.service.mixerAppInstalled || root.service.mixerAppInstallable : false
+              text: root.service && root.service.mixerAppInstalled ? "Open mixer" : "Install mixer"
+              iconText: root.service && root.service.mixerAppInstalled
+                ? String.fromCodePoint(0xF03CC) : String.fromCodePoint(0xF01DA)
+              tooltipText: root.service && root.service.mixerAppInstalled
+                ? "Edit mixes and levels in ALSA Scarlett Control Panel"
+                : "Install ALSA Scarlett Control Panel (alsa-scarlett-gui) in a terminal"
+              hasCursor: root.cursorActive && root.focusRow === 2
+              onClicked: root.activateMixerApp()
             }
           }
 
@@ -433,17 +409,44 @@ Panel {
             wrapMode: Text.Wrap
           }
 
-          Text {
+          Column {
             width: parent.width
-            visible: root.routingAvailable && root.visibleRoutes.length > 0
-            text: "Click an output to change what it plays."
-            color: Qt.darker(root.foreground, 1.6)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
+            spacing: Style.space(2)
+            visible: root.routingAvailable
 
-          RouteGroup { title: "Outputs"; section: "hear" }
-          RouteGroup { title: "To computer"; section: "record" }
+            RouteGroup { title: root.showAllRoutes ? "Outputs" : ""; section: "hear" }
+            RouteGroup { title: "To computer"; section: "record" }
+
+            CursorSurface {
+              width: parent.width
+              visible: root.canShowAll
+              implicitHeight: showAllText.implicitHeight + Style.spacing.xl
+              hasCursor: root.cursorActive && root.focusRow === root.showAllRow
+              foreground: root.foreground
+
+              Text {
+                id: showAllText
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(36)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.showAllRoutes ? "Show fewer" : "Show " + root.hiddenRoutes + " more"
+                color: Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onContainsMouseChanged: if (containsMouse) {
+                  root.cursorActive = true
+                  root.focusRow = root.showAllRow
+                }
+                onClicked: root.toggleShowAll()
+              }
+            }
+          }
 
           Item {
             width: parent.width
@@ -511,7 +514,7 @@ Panel {
               SmallButton {
                 required property var modelData
                 required property int index
-                text: (index < 9 ? (index + 1) + "  " : "") + modelData.name
+                text: modelData.name
                 tooltipText: !modelData.compatible ? "Saved from a different interface · right-click to delete"
                   : (modelData.active ? "Current routing matches this preset · right-click to delete"
                                       : "Apply this routing · right-click to delete")
@@ -555,8 +558,7 @@ Panel {
           Text {
             width: parent.width
             visible: root.routingAvailable && root.presets.length === 0 && !root.savingPreset
-            text: "Save the current routing here, or use File › Save Configuration in the mixer app to save into "
-              + (root.service ? root.service.presetsDir.replace(/^\/home\/[^/]+/, "~") : "") + "."
+            text: "No presets yet. Save the current routing to switch back to it in one click."
             color: Qt.darker(root.foreground, 1.4)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -596,9 +598,8 @@ Panel {
           // Key hints only matter once the keyboard is in use.
           Text {
             width: parent.width
-            visible: root.cursorActive
-            text: "Enter: change an output · ←/→ pick · Esc back · X delete\n"
-              + "M mute · H monitor · O mixer · A all · S save · N next"
+            visible: root.keyboardUsed
+            text: "Enter change · Esc back · M mute · H hear · S save · N next"
             color: Qt.darker(root.foreground, 1.6)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -619,19 +620,23 @@ Panel {
     verticalPadding: Style.space(3)
   }
 
+  // One row per destination, in the style of the built-in audio panel's
+  // device rows: what it is, and a single line saying what it plays.
   component RouteGroup: Column {
     id: group
     property string title: ""
     property string section: ""
     readonly property var rows: root.visibleRoutes.filter(function(row) { return row.section === group.section })
-    // Destinations sit in one column so the outputs can be scanned top to bottom.
-    readonly property real destinationWidth: Style.space(96)
 
     width: parent ? parent.width : 0
-    spacing: Style.space(6)
+    spacing: Style.space(2)
     visible: rows.length > 0
 
     Text {
+      visible: group.title !== ""
+      leftPadding: Style.space(6)
+      topPadding: Style.space(6)
+      bottomPadding: Style.space(2)
       text: group.title
       color: Qt.darker(root.foreground, 1.5)
       font.family: root.fontFamily
@@ -644,57 +649,106 @@ Panel {
       Column {
         id: routeRow
         required property var modelData
+        readonly property int cursorIndex: root.firstRouteRow + root.visibleRoutes.indexOf(modelData)
+        readonly property bool onCursor: root.cursorActive && root.focusRow === cursorIndex
         readonly property bool expanded: root.expandedRoute === modelData.key
         readonly property bool changeable: (modelData.choices || []).length > 0
         width: group.width
-        spacing: Style.space(6)
+        spacing: Style.space(2)
 
-        Item {
+        CursorSurface {
           width: parent.width
-          implicitHeight: Math.max(destination.implicitHeight, chain.implicitHeight)
+          implicitHeight: routeLabels.implicitHeight + Style.spacing.xl
+          // While open, the cursor lives on the choices instead.
+          hasCursor: routeRow.onCursor && !routeRow.expanded
+          current: routeRow.expanded
+          foreground: root.foreground
 
-          RouteChip {
-            id: destination
+          Text {
+            id: routeIcon
             anchors.left: parent.left
-            anchors.top: parent.top
-            role: "destination"
-            label: routeRow.modelData.destination
-            kind: routeRow.modelData.kind
-            hint: routeRow.modelData.destination_hint + (routeRow.changeable ? " · click to change" : "")
-            clickable: routeRow.changeable
-            selected: routeRow.expanded
-            hasCursor: root.cursorActive && root.cursorRoute !== null && root.cursorRoute.key === routeRow.modelData.key
-            onClicked: root.toggleRoute(routeRow.modelData.key)
+            anchors.leftMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(22)
+            horizontalAlignment: Text.AlignHCenter
+            text: root.glyphs[routeRow.modelData.kind] || root.glyphs.out
+            color: root.foreground
+            opacity: routeRow.modelData.off ? 0.5 : 1.0
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
           }
 
-          Flow {
-            id: chain
-            anchors.left: parent.left
-            anchors.leftMargin: Math.max(group.destinationWidth, destination.width + Style.space(4))
-            anchors.right: parent.right
-            spacing: Style.space(4)
+          Column {
+            id: routeLabels
+            anchors.left: routeIcon.right
+            anchors.leftMargin: Style.space(8)
+            anchors.right: routeChevron.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
 
-            Repeater {
-              model: root.chainItems(routeRow.modelData)
-              RouteChip {
-                required property var modelData
-                role: modelData.role
-                label: modelData.label || ""
-                kind: modelData.kind || ""
-                hint: modelData.hint || ""
-                db: modelData.db === undefined ? null : modelData.db
-              }
+            Text {
+              width: parent.width
+              text: routeRow.modelData.destination
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: routeRow.expanded
+              elide: Text.ElideRight
             }
+
+            Text {
+              id: summaryText
+              width: parent.width
+              text: root.routeSummary(routeRow.modelData)
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+          }
+
+          Text {
+            id: routeChevron
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            visible: routeRow.changeable
+            text: routeRow.expanded ? root.glyphs.open : root.glyphs.closed
+            color: Qt.darker(root.foreground, 1.4)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          MouseArea {
+            id: routeMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: routeRow.changeable ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusRow = routeRow.cursorIndex
+            }
+            onClicked: if (routeRow.changeable) root.toggleRoute(routeRow.modelData.key)
+          }
+
+          PanelToolTip {
+            visible: routeMouse.containsMouse && summaryText.truncated
+            text: summaryText.text
+            fontFamily: root.fontFamily
           }
         }
 
-        // Inline picker rather than a popup: it can never be clipped by the
-        // panel's edge, and it keeps the choice next to the row it changes.
-        // One line per kind of source keeps large interfaces scannable.
+        // Inline rather than a popup so it can never be clipped by the
+        // panel's edge. One line per kind of source keeps large interfaces
+        // scannable.
         Column {
           visible: routeRow.expanded
           width: parent.width
-          spacing: Style.space(4)
+          leftPadding: Style.space(36)
+          topPadding: Style.space(4)
+          bottomPadding: Style.space(8)
+          spacing: Style.space(6)
 
           Repeater {
             model: routeRow.expanded ? root.choiceGroups(routeRow.modelData.choices) : []
@@ -702,37 +756,40 @@ Panel {
             Item {
               id: choiceGroup
               required property var modelData
-              width: parent.width
-              implicitHeight: choiceFlow.implicitHeight
+              width: parent.width - parent.leftPadding
+              implicitHeight: Math.max(groupTitle.implicitHeight, choiceFlow.implicitHeight)
 
               Text {
-                anchors.right: choiceFlow.left
-                anchors.rightMargin: Style.space(8)
-                y: Style.space(4)
+                id: groupTitle
+                y: Style.space(3)
+                width: Style.space(64)
                 text: choiceGroup.modelData.title
                 color: Qt.darker(root.foreground, 1.6)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
               }
 
               Flow {
                 id: choiceFlow
                 anchors.left: parent.left
-                anchors.leftMargin: group.destinationWidth
+                anchors.leftMargin: Style.space(64)
                 anchors.right: parent.right
                 spacing: Style.space(4)
 
                 Repeater {
                   model: choiceGroup.modelData.items
-                  RouteChip {
+
+                  ChoicePill {
                     required property var modelData
-                    role: "choice"
-                    hasCursor: root.cursorActive && modelData.index === root.choiceCursor
                     label: modelData.choice.label
-                    kind: modelData.choice.kind
-                    selected: modelData.choice.current
-                    clickable: true
-                    hint: modelData.choice.current ? "Playing now" : "Play " + modelData.choice.label + " here"
+                    current: modelData.choice.current
+                    hasCursor: routeRow.onCursor && root.choiceCursor === modelData.index
+                    onHovered: {
+                      root.cursorActive = true
+                      root.focusRow = routeRow.cursorIndex
+                      root.choiceCursor = modelData.index
+                    }
                     onClicked: root.chooseRoute(routeRow.modelData.key, modelData.choice)
                   }
                 }
@@ -744,91 +801,34 @@ Panel {
     }
   }
 
-  component RouteChip: Rectangle {
-    id: chip
-    property string role: "source"
+  component ChoicePill: CursorSurface {
+    id: pill
     property string label: ""
-    property string kind: ""
-    property string hint: ""
-    property var db: null
-    property bool clickable: false
-    property bool selected: false
-    property bool hasCursor: false
     signal clicked()
+    signal hovered()
 
-    readonly property bool arrow: role === "arrow"
-    readonly property bool note: role === "note"
-    readonly property bool emphasis: role === "destination" || selected
-    readonly property bool hot: clickable && (chipMouse.containsMouse || hasCursor)
-    readonly property color tint: emphasis ? Color.accent : root.foreground
-
-    // The hidden half of a chip reports no size, so each mode measures its own.
-    implicitWidth: arrow ? arrowGlyph.implicitWidth : chipRow.implicitWidth + Style.space(10)
-    implicitHeight: (arrow ? arrowGlyph.implicitHeight : chipRow.implicitHeight) + Style.space(6)
-    radius: Math.min(Style.cornerRadius, height / 2)
-    color: arrow || note ? "transparent"
-      : Qt.rgba(tint.r, tint.g, tint.b, hot ? 0.24 : (emphasis ? 0.18 : (role === "via" ? 0.12 : 0.06)))
-    border.width: arrow || note ? 0 : 1
-    border.color: Qt.rgba(tint.r, tint.g, tint.b, hot || selected ? 0.8 : (emphasis ? 0.55 : 0.2))
+    foreground: root.foreground
+    // A faint fill instead of borders keeps a long list of choices quiet.
+    color: hasCursor ? fill : (current ? currentFill : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07))
+    implicitWidth: pillText.implicitWidth + Style.space(14)
+    implicitHeight: pillText.implicitHeight + Style.space(6)
 
     Text {
-      id: arrowGlyph
+      id: pillText
       anchors.centerIn: parent
-      visible: chip.arrow
-      text: root.glyphs.from
-      color: Qt.darker(root.foreground, 1.6)
+      text: pill.label
+      color: root.foreground
       font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-
-    Row {
-      id: chipRow
-      anchors.centerIn: parent
-      visible: !chip.arrow
-      spacing: Style.space(3)
-
-      Text {
-        visible: text !== ""
-        anchors.verticalCenter: parent.verticalCenter
-        text: root.glyphs[chip.kind] || ""
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-      }
-
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        text: chip.label
-        color: chip.note ? Qt.darker(root.foreground, 1.5) : root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        font.bold: chip.emphasis
-        font.italic: chip.note
-      }
-
-      Text {
-        visible: chip.db !== null && chip.db !== 0
-        anchors.verticalCenter: parent.verticalCenter
-        text: (chip.db > 0 ? "+" : "−") + Math.abs(chip.db) + " dB"
-        color: Qt.darker(root.foreground, 1.5)
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
+      font.pixelSize: Style.font.caption
+      font.bold: pill.current
     }
 
     MouseArea {
-      id: chipMouse
       anchors.fill: parent
-      enabled: !chip.arrow
       hoverEnabled: true
-      cursorShape: chip.clickable ? Qt.PointingHandCursor : Qt.ArrowCursor
-      onClicked: if (chip.clickable) chip.clicked()
-    }
-
-    PanelToolTip {
-      visible: chip.hint !== "" && chipMouse.containsMouse
-      text: chip.hint
-      fontFamily: root.fontFamily
+      cursorShape: Qt.PointingHandCursor
+      onContainsMouseChanged: if (containsMouse) pill.hovered()
+      onClicked: pill.clicked()
     }
   }
 
@@ -850,6 +850,8 @@ Panel {
       id: controlIcon
       anchors.left: parent.left
       anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(28)
+      horizontalAlignment: Text.AlignHCenter
       text: control.iconText
       color: root.foreground
       font.family: root.fontFamily

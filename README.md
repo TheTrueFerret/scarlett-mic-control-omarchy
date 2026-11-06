@@ -55,13 +55,14 @@ omarchy restart shell
 | `M` in the panel | Toggle microphone capture mute |
 | `H` in the panel | Toggle headphone monitoring |
 | `O` in the panel | Open ALSA Scarlett Control Panel |
-| `A` in the panel | Show all routes, or only the outputs in use |
+| `A` in the panel | Show every route, or only the outputs in use |
 | `S` in the panel | Save the current routing as a preset |
 | `N` in the panel | Apply the next preset |
 | `1`–`9` in the panel | Apply that preset |
 | `X` on a preset | Delete it, after confirming |
 
-Key hints appear at the bottom of the panel once you start using the keyboard.
+A one-line key hint appears at the bottom of the panel once you start using
+the keyboard.
 
 The panel uses separate switches so muting yourself for a call never silently
 changes what you hear in the headphones, and disabling monitoring never mutes
@@ -69,26 +70,26 @@ the recording source.
 
 ## Routing view
 
-The panel reads the interface's routing straight from its ALSA mixer controls.
-Each row starts with a destination, so the outputs line up and can be scanned
-top to bottom, followed by what feeds it:
+The panel reads the interface's routing straight from its ALSA mixer controls
+and lists one row per output, styled like the device rows in Omarchy's own
+audio panel: the output's name, and one line saying what it plays.
 
 ```text
-Line 1–2  ← Mix A–B ← PC 1–2                    computer playback to the monitors
-Phones    ← Mix E–F ← In 1 (DSP) −48 dB, PC 1–2
-Rec 1–2   ← In 1–2 (DSP)                        what applications record
-Rec 5–6   ← Mix E–F  same as Phones
+Line 1–2   PC 1–2 via Mix A–B
+Line 3–4   In 1
+Phones     In 1 (DSP) −48 dB + PC 1–2 via Mix E–F
+Rec 5–6    Same as Phones
 ```
 
 - **In** is a hardware input, **PC** is computer playback, **Rec** is a channel
   the computer records, **Mix A–F** are the interface's internal mixes, and
   **(DSP)** marks an input that passes through the interface's processing.
-  Hover any chip for a plain-language description.
 - Stereo pairs and banks of channels are folded into one row, and a recording
   channel fed by the same mix as an output refers back to it.
-- Levels are shown only when a mix input is not at 0 dB.
-- By default only outputs in use are shown. **Show all** (or `A`) adds what the
-  computer records and unused outputs; the choice is remembered.
+- Levels are shown only when a mix input is not at 0 dB. A line too long for
+  the panel shows in full when you hover it.
+- By default only outputs in use are shown. **Show more** (or `A`) adds what
+  the computer records and unused outputs; the choice is remembered.
 
 The view refreshes every few seconds, so changes made in ALSA Scarlett Control
 Panel appear on their own. Front-panel names (Line, Phones) are shown for the
@@ -96,8 +97,9 @@ Scarlett 4i4 4th Gen; other models use generic `Out` numbers.
 
 ### Changing a route
 
-Click an output (or move to it and press `Enter`) to see what it can play,
-grouped into computer playback, inputs, digital inputs, and mixes; pick one to
+Click an output (or move to it and press `Enter`) to open what it can play
+below it, grouped into computer playback, inputs, digital inputs, and mixes,
+with the current source highlighted; pick one to
 switch both channels of the pair at once. A source shared across both sides is
 offered as *mono*. Choices are limited to what the interface's driver accepts
 for that output, and nothing is written unless every channel accepts the

@@ -4,9 +4,10 @@ All notable changes to this project will be documented here.
 
 ## 1.1.0 — 2026-11-06
 
-- Show the interface's current routing in the panel: what each output and
-  computer recording channel plays, through which mix, at what level, with a
-  plain-language description on hover and a compact view of the outputs in use.
+- Show the interface's current routing in the panel: one row per output and
+  computer recording channel saying what it plays, through which mix, and at
+  what level, styled like Omarchy's audio panel, with a compact view of the
+  outputs in use.
 - Switch what an output or recording channel plays from the panel, by mouse or
   keyboard, among the sources the driver accepts for it.
 - Add routing presets: save the current routing, or a configuration saved from
