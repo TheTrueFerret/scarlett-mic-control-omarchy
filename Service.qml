@@ -19,6 +19,12 @@ Item {
   property string presetsDir: ""
   property bool mixerAppInstalled: false
   property bool mixerAppInstallable: false
+  property string routingView: "compact"
+  property string notice: ""
+  readonly property string activePreset: {
+    for (var i = 0; i < presets.length; i++) if (presets[i].active) return presets[i].name
+    return ""
+  }
   property string message: ""
   property string lastError: ""
   property var queue: []
@@ -53,6 +59,11 @@ Item {
       presetsDir = String(data.presets_dir || "")
       mixerAppInstalled = data.mixer_app_installed === true
       mixerAppInstallable = data.mixer_app_installable === true
+      routingView = data.routing_view === "all" ? "all" : "compact"
+      if (data.notice) {
+        notice = String(data.notice)
+        noticeTimer.restart()
+      }
       message = String(data.message || "")
       lastError = ""
     } catch (error) {
@@ -66,7 +77,7 @@ Item {
       monitorAvailable: monitorAvailable, monitorEnabled: monitorEnabled,
       monitorVolume: monitorVolume, monitorDevice: monitorDevice,
       routingAvailable: routingAvailable, routing: routing, presets: presets,
-      mixerAppInstalled: mixerAppInstalled,
+      mixerAppInstalled: mixerAppInstalled, activePreset: activePreset,
       message: message, error: lastError
     })
   }
@@ -99,6 +110,21 @@ Item {
   function setMonitorVolume(percent) { run(["monitor-volume", String(Math.round(percent))]) }
   function applyPreset(name) { run(["preset-apply", String(name)]) }
   function savePreset(name) { run(["preset-save", String(name)]) }
+  function deletePreset(name) { run(["preset-delete", String(name)]) }
+  function setRoute(rowKey, choiceKey) { run(["route-set", String(rowKey), String(choiceKey)]) }
+  function setRoutingView(view) {
+    routingView = view === "all" ? "all" : "compact"
+    run(["routing-view", routingView])
+  }
+
+  // Step through presets in order; from an unsaved routing, start at the first.
+  function applyNextPreset() {
+    var usable = presets.filter(function(preset) { return preset.compatible })
+    if (usable.length === 0) return
+    var current = -1
+    for (var i = 0; i < usable.length; i++) if (usable[i].name === activePreset) current = i
+    applyPreset(usable[(current + 1) % usable.length].name)
+  }
 
   // ALSA Scarlett Control Panel owns the full routing matrix; focus it when it
   // is already open rather than stacking a second window.
@@ -139,6 +165,12 @@ Item {
         helper.running = true
       }
     }
+  }
+
+  Timer {
+    id: noticeTimer
+    interval: 4000
+    onTriggered: root.notice = ""
   }
 
   Timer {

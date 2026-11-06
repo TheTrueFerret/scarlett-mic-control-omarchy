@@ -35,6 +35,9 @@ def compact(rows):
             source["label"] + ("" if source["db"] in (None, 0) else f" {source['db']} dB")
             for source in row["sources"]
         )
+        if row["off"]:
+            lines.append(f"{row['destination']} <- Off")
+            continue
         lines.append(f"{row['destination']} <- {row['via'] or '-'} <- {sources}")
     return lines
 
@@ -172,6 +175,7 @@ class RoutingViewTests(unittest.TestCase):
         self.assertEqual(compact(monitor.routing_rows(controls)), [
             "Out 1–2 <- Mix A–B <- In 1, PC 1–2",
             "Rec 1–2 <- - <- In 1–2",
+            "Rec 3 <- Off",
         ])
 
     def test_inputs_shared_by_a_stereo_mix_fold_into_one_range(self):
@@ -217,6 +221,95 @@ class RoutingViewTests(unittest.TestCase):
                         for source in row["sources"]:
                             self.assertTrue(source["label"])
                             self.assertTrue(source["db"] is None or -100 <= source["db"] <= 12, source)
+
+
+class RouteEditingTests(unittest.TestCase):
+    def rows(self):
+        return {row["key"]: row for row in monitor.routing_rows(fixture_controls(), "Scarlett 4i4 4th Gen")}
+
+    def test_rows_offer_aligned_stereo_choices_with_the_current_one_marked(self):
+        phones = self.rows()["out:5:2"]
+        labels = [choice["label"] for choice in phones["choices"]]
+        self.assertEqual(labels, [
+            "PC 1–2", "PC 3–4", "PC 5–6", "In 1–2", "In 3–4", "In 1–2 (DSP)", "Mix A–B", "Mix C–D", "Mix E–F", "Off",
+        ])
+        self.assertEqual([choice["key"] for choice in phones["choices"] if choice["current"]], ["mix:5:2"])
+
+    def test_a_mono_source_on_both_sides_stays_selectable(self):
+        line = self.rows()["out:3:2"]
+        self.assertEqual(line["current"], "in:1:1")
+        self.assertEqual(
+            line["choices"][0],
+            {"key": "in:1:1", "label": "In 1 (mono)", "kind": "in", "group": "Inputs", "current": True},
+        )
+
+    def test_recording_the_headphone_mix_refers_back_to_it(self):
+        rows = self.rows()
+        self.assertEqual(rows["rec:5:2"]["same_as"], "Phones")
+        self.assertEqual(rows["out:5:2"]["same_as"], "")
+
+    def test_chips_explain_themselves(self):
+        phones = self.rows()["out:5:2"]
+        self.assertEqual(phones["destination_hint"], "Headphone output")
+        self.assertIn("blends its sources", phones["via_hint"])
+        self.assertEqual(
+            phones["sources"][0]["hint"],
+            "Input 1 on the interface, after the interface's input processing (DSP), mixed in at −48 dB",
+        )
+        self.assertEqual(phones["sources"][1]["hint"], "Audio your computer plays on channels 1–2")
+
+    def set_route(self, row, choice):
+        commands = self.commands = []
+        with patch.object(monitor, "require_card", return_value="Gen"), \
+             patch.object(monitor, "read_controls", return_value=fixture_controls()), \
+             patch.object(monitor, "model_name", return_value="Scarlett 4i4 4th Gen"), \
+             patch.object(monitor, "run", side_effect=lambda command: commands.append(command) or ""), \
+             patch.object(monitor, "status", return_value={"ok": True}):
+            result = monitor.set_route(row, choice)
+        return commands, result
+
+    def items(self, name):
+        return fixture_controls()[name]["items"]
+
+    def test_stereo_choice_sets_both_channels_by_item_index(self):
+        commands, result = self.set_route("out:5:2", "pc:1:2")
+        left = self.items("Analogue Output 05 Playback Enum").index("PCM 1")
+        right = self.items("Analogue Output 06 Playback Enum").index("PCM 2")
+        self.assertEqual([command[-1] for command in commands], [str(left), str(right)])
+        self.assertTrue(all(command[:5] == ["amixer", "-q", "-c", "Gen", "cset"] for command in commands))
+        self.assertEqual(result["notice"], "Phones now plays PC 1–2")
+
+    def test_mono_and_off_choices(self):
+        commands, _ = self.set_route("out:3:2", "in:2:1")
+        index = str(self.items("Analogue Output 03 Playback Enum").index("Analogue 2"))
+        self.assertEqual([command[-1] for command in commands], [index, index])
+        commands, result = self.set_route("rec:3:2", "off")
+        self.assertEqual([command[-1] for command in commands], ["0", "0"])
+        self.assertEqual(result["notice"], "Rec 3–4 is now off")
+
+    def test_invalid_routes_write_nothing(self):
+        for row, choice in (
+            ("out:9:2", "pc:1:2"),     # no such output
+            ("out:5:2", "pc:1:3"),     # width mismatch
+            ("out:5:2", "mix:7:2"),    # Mix G–H does not exist on a 4i4
+            ("out:5:2", "pc:1:2;rm"),  # not a choice key
+            ("bogus", "off"),
+        ):
+            with self.subTest(row=row, choice=choice):
+                with self.assertRaises(monitor.MonitorError):
+                    self.set_route(row, choice)
+                self.assertEqual(self.commands, [])
+
+
+class ConfigTests(unittest.TestCase):
+    def test_routing_view_is_remembered_and_validated(self):
+        with tempfile.TemporaryDirectory() as config, patch.dict(os.environ, {"XDG_CONFIG_HOME": config}):
+            self.assertEqual(monitor.load_config()["routing_view"], "compact")
+            with patch.object(monitor, "status", return_value={"ok": True}):
+                monitor.dispatch(["routing-view", "all"])
+            self.assertEqual(monitor.load_config()["routing_view"], "all")
+            monitor.config_path().write_text('{"routing_view": "huge", "last_monitor_volume": 40}', encoding="utf-8")
+            self.assertEqual(monitor.load_config(), {"version": 1, "last_monitor_volume": 40, "routing_view": "compact"})
 
 
 class PresetTests(unittest.TestCase):
@@ -290,6 +383,18 @@ class PresetTests(unittest.TestCase):
             with self.assertRaises(monitor.MonitorError):
                 monitor.apply_preset("Gen 1")
         run.assert_not_called()
+
+    def test_delete_removes_only_the_named_preset(self):
+        self.write_preset("Keep")
+        self.write_preset("Remove")
+        with patch.object(monitor, "status", return_value={"ok": True}):
+            result = monitor.delete_preset("Remove")
+            with self.assertRaises(monitor.MonitorError):
+                monitor.delete_preset("Remove")
+            with self.assertRaises(monitor.MonitorError):
+                monitor.delete_preset("../scarlett-mic-control")
+        self.assertEqual(result["notice"], "Deleted Remove")
+        self.assertEqual(sorted(path.stem for path in monitor.presets_dir().iterdir()), ["Keep"])
 
     def test_saving_never_overwrites_an_existing_preset(self):
         self.write_preset("Keep")

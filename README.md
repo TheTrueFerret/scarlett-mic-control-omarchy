@@ -7,10 +7,11 @@ A small, theme-aware Omarchy bar widget for a Focusrite Scarlett interface:
 - **Hear myself** independently controls compatible Scarlett zero-latency
   headphone monitoring.
 - **Routing** shows at a glance what each output and each computer recording
-  channel is fed by, and through which internal mix.
+  channel plays, and through which internal mix. Click an output to switch it
+  to another source.
 - **Presets** switch the interface between saved routings, and **Open mixer**
   jumps to [ALSA Scarlett Control Panel](https://github.com/geoffreybennett/alsa-scarlett-gui)
-  for full editing.
+  for editing mixes and levels.
 
 Normal speakers, headphones, Bluetooth devices, and application routing remain
 under Omarchy's built-in audio widget.
@@ -47,11 +48,20 @@ omarchy restart shell
 | Right-click the bar icon | Mute or unmute the Scarlett microphone for applications |
 | Middle-click the bar icon | Toggle compatible hardware monitoring |
 | Scroll over the bar icon | Adjust hardware-monitor volume |
+| Click an output in the panel | Choose what it plays |
+| Right-click a preset | Delete it, after confirming |
+| `↑`/`↓` or `J`/`K` in the panel | Move between controls, outputs, and presets |
+| `Enter` on an output | Open its choices; `←`/`→` to pick, `Enter` to apply, `Esc` to back out |
 | `M` in the panel | Toggle microphone capture mute |
 | `H` in the panel | Toggle headphone monitoring |
 | `O` in the panel | Open ALSA Scarlett Control Panel |
+| `A` in the panel | Show all routes, or only the outputs in use |
 | `S` in the panel | Save the current routing as a preset |
+| `N` in the panel | Apply the next preset |
 | `1`–`9` in the panel | Apply that preset |
+| `X` on a preset | Delete it, after confirming |
+
+Key hints appear at the bottom of the panel once you start using the keyboard.
 
 The panel uses separate switches so muting yourself for a call never silently
 changes what you hear in the headphones, and disabling monitoring never mutes
@@ -59,25 +69,43 @@ the recording source.
 
 ## Routing view
 
-The panel reads the interface's routing straight from its ALSA mixer controls
-and draws each route as a chain, for example:
+The panel reads the interface's routing straight from its ALSA mixer controls.
+Each row starts with a destination, so the outputs line up and can be scanned
+top to bottom, followed by what feeds it:
 
 ```text
-PC 1–2 → Mix A–B → Line 1–2        computer playback to the monitors
-In 1 (DSP) −48 dB, PC 1–2 → Mix E–F → Phones
-In 1–2 (DSP) → Rec 1–2             what applications record
+Line 1–2  ← Mix A–B ← PC 1–2                    computer playback to the monitors
+Phones    ← Mix E–F ← In 1 (DSP) −48 dB, PC 1–2
+Rec 1–2   ← In 1–2 (DSP)                        what applications record
+Rec 5–6   ← Mix E–F  same as Phones
 ```
 
 - **In** is a hardware input, **PC** is computer playback, **Rec** is a channel
   the computer records, **Mix A–F** are the interface's internal mixes, and
   **(DSP)** marks an input that passes through the interface's processing.
-- Stereo pairs and banks of channels are folded into one row; outputs and
-  recording channels set to Off are hidden.
+  Hover any chip for a plain-language description.
+- Stereo pairs and banks of channels are folded into one row, and a recording
+  channel fed by the same mix as an output refers back to it.
 - Levels are shown only when a mix input is not at 0 dB.
+- By default only outputs in use are shown. **Show all** (or `A`) adds what the
+  computer records and unused outputs; the choice is remembered.
 
 The view refreshes every few seconds, so changes made in ALSA Scarlett Control
 Panel appear on their own. Front-panel names (Line, Phones) are shown for the
 Scarlett 4i4 4th Gen; other models use generic `Out` numbers.
+
+### Changing a route
+
+Click an output (or move to it and press `Enter`) to see what it can play,
+grouped into computer playback, inputs, digital inputs, and mixes; pick one to
+switch both channels of the pair at once. A source shared across both sides is
+offered as *mono*. Choices are limited to what the interface's driver accepts
+for that output, and nothing is written unless every channel accepts the
+change. Mixes themselves, their levels, and anything more detailed are edited
+in ALSA Scarlett Control Panel.
+
+Be careful when routing an input to the outputs that drive your speakers: a
+microphone near them can feed back.
 
 ## Presets
 
@@ -92,10 +120,13 @@ Control Panel uses for **File › Save Configuration**. Presets live in:
   and levels) under a name you type. Existing presets are never overwritten.
 - Configurations saved from the mixer app into that folder appear
   automatically.
-- Clicking a preset restores it with `alsactl -I`, so a failed restore never
-  falls back to resetting the interface to defaults.
-- The preset whose routing matches the interface is highlighted. Levels are not
-  compared, so moving the monitor slider keeps it highlighted.
+- Clicking a preset (or `1`–`9`, or `N` for the next one) restores it with
+  `alsactl -I`, so a failed restore never falls back to resetting the interface
+  to defaults. A short confirmation appears below the presets.
+- The preset whose routing matches the interface is highlighted, and the
+  header says *current routing not saved* when none does. Levels are not
+  compared, so moving the monitor slider keeps a preset highlighted.
+- Right-click a preset, or press `X` on it, to delete it after confirming.
 - A preset saved on another computer works even though ALSA may name the card
   differently there (`Gen`, `USB`, `USB_1`, …): a preset with a single
   interface is applied to the connected one.
@@ -113,10 +144,20 @@ omarchy-shell io.github.thetrueferret.scarlett-mic-control status
 omarchy-shell io.github.thetrueferret.scarlett-mic-control toggle
 omarchy-shell io.github.thetrueferret.scarlett-mic-control openMixer
 omarchy-shell io.github.thetrueferret.scarlett-mic-control applyPreset Streaming
+omarchy-shell io.github.thetrueferret.scarlett-mic-control nextPreset
 omarchy-shell io.github.thetrueferret.scarlett-mic-control savePreset "Late night"
+omarchy-shell io.github.thetrueferret.scarlett-mic-control deletePreset "Late night"
+omarchy-shell io.github.thetrueferret.scarlett-mic-control setRoute out:5:2 pc:1:2
 ```
 
-`toggle`, `open`, and `close` control the panel; `status` returns JSON.
+`toggle`, `open`, and `close` control the panel; `status` returns JSON, and
+the bar icon's tooltip names the active preset.
+
+`setRoute` takes a row key and a choice key as reported by `status`: a row is
+`<out|spdif|adat|rec>:<first channel>:<channels>` and a choice is
+`<pc|in|dsp|spdif|adat|mix>:<first>:<channels>` or `off`. With a 4th Gen 4i4,
+`setRoute out:5:2 pc:1:2` sends computer playback straight to the headphones,
+and `setRoute out:5:2 mix:5:2` puts the monitoring mix back.
 
 ## Compatibility
 

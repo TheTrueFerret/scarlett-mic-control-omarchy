@@ -22,6 +22,10 @@ FOCUSRITE_USB_VENDOR = "1235"
 MIXER_APP = "alsa-scarlett-gui"
 PRESET_SUFFIX = ".state"
 PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,47}$")
+ROUTING_VIEWS = ("compact", "all")
+DEFAULT_CONFIG = {"version": 1, "last_monitor_volume": 75, "routing_view": "compact"}
+ROW_KEY = re.compile(r"^(out|spdif|adat|rec):(\d+):(\d+)$")
+CHOICE_KEY = re.compile(r"^(?:off|(in|spdif|adat|pc|dsp|mix):(\d+):(\d+))$")
 
 # Routing controls exposed by the scarlett2 kernel driver and by the user-space
 # FCP driver of the large 4th Gen interfaces, which drops "Output"/"Input".
@@ -37,6 +41,9 @@ MIX_GAIN = re.compile(r"^Mix ([A-Z]) Input 0*(\d+) Playback Volume$")
 SOURCE_ITEM = re.compile(r"^(Analogue|S/PDIF|ADAT|PCM|DSP|Mix) ([A-Z]|\d+)$")
 SOURCE_KINDS = {"Analogue": "in", "S/PDIF": "spdif", "ADAT": "adat", "PCM": "pc", "DSP": "dsp", "Mix": "mix"}
 SOURCE_NAMES = {"in": "In", "spdif": "S/PDIF", "adat": "ADAT", "pc": "PC", "dsp": "DSP", "mix": "Mix"}
+ITEM_NAMES = {kind: item for item, kind in SOURCE_KINDS.items()}
+CHOICE_ORDER = ("pc", "in", "dsp", "spdif", "adat", "mix")
+CHOICE_GROUPS = {"pc": "Computer", "in": "Inputs", "dsp": "Inputs", "spdif": "Digital", "adat": "Digital", "mix": "Mixes"}
 DESTINATION_NAMES = {"out": "Out", "spdif": "S/PDIF Out", "adat": "ADAT Out", "rec": "Rec"}
 
 # Friendly names for output pairs, only where the front panel is known.
@@ -67,14 +74,19 @@ def load_config() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         # A missing, unreadable, or hand-edited preferences file must never take
         # the controls down with it; the next successful write replaces it.
-        return {"version": 1, "last_monitor_volume": 75}
+        return dict(DEFAULT_CONFIG)
     if not isinstance(value, dict):
-        return {"version": 1, "last_monitor_volume": 75}
+        return dict(DEFAULT_CONFIG)
     try:
         volume = int(value.get("last_monitor_volume", 75))
     except (TypeError, ValueError):
         volume = 75
-    return {"version": 1, "last_monitor_volume": max(1, min(100, volume))}
+    view = value.get("routing_view")
+    return {
+        "version": 1,
+        "last_monitor_volume": max(1, min(100, volume)),
+        "routing_view": view if view in ROUTING_VIEWS else "compact",
+    }
 
 
 def save_config(config: dict[str, Any]) -> None:
@@ -208,10 +220,10 @@ def parse_amixer_contents(text: str) -> dict[str, dict[str, Any]]:
     controls: dict[str, dict[str, Any]] = {}
     current: dict[str, Any] | None = None
     for line in text.splitlines():
-        header = re.match(r"^numid=\d+,iface=\w+,name='(.*)'", line)
+        header = re.match(r"^numid=(\d+),iface=\w+,name='(.*)'", line)
         if header:
-            current = {"type": "", "items": [], "raw": None, "min": 0, "max": 0, "db": None}
-            controls[header.group(1)] = current
+            current = {"type": "", "items": [], "raw": None, "min": 0, "max": 0, "db": None, "numid": int(header.group(1))}
+            controls[header.group(2)] = current
             continue
         if current is None:
             continue
@@ -287,6 +299,8 @@ def parse_state_file(text: str) -> dict[str, dict[str, dict[str, Any]]]:
                 _, low, high = control["db"] or ("minmax", 0.0, 0.0)
                 hundredths = _int(value, 0) / 100
                 control["db"] = ("minmax", hundredths, high) if key == "dbmin" else ("minmax", low, hundredths)
+            elif re.match(r"^item\.\d+$", key):
+                control["items"].append(value)
             elif key == "dbvalue.0":
                 # alsactl already resolved the TLV, whatever its scale type.
                 control["db_value"] = _int(value, 0) / 100
@@ -330,6 +344,8 @@ def _normalize(control: dict[str, Any]) -> dict[str, Any]:
         "max": control.get("max", 0),
         "db": control.get("db"),
         "db_value": control.get("db_value"),
+        "items": list(items),
+        "numid": control.get("numid"),
     }
 
 
@@ -416,6 +432,7 @@ def mix_gain_db(control: dict[str, Any]) -> float | None:
 
 def routing_tables(controls: dict[str, dict[str, Any]]) -> dict[str, Any]:
     destinations: dict[str, dict[int, tuple[str, int] | None]] = {}
+    names: dict[str, dict[int, str]] = {}
     mixer_inputs: dict[int, tuple[str, int] | None] = {}
     dsp_inputs: dict[int, tuple[str, int] | None] = {}
     mixes: dict[int, list[tuple[tuple[str, int], int | None]]] = {}
@@ -432,6 +449,7 @@ def routing_tables(controls: dict[str, dict[str, Any]]) -> dict[str, Any]:
             match = pattern.match(name)
             if match:
                 destinations.setdefault(kind, {})[int(match.group(1))] = parse_source(control["value"])
+                names.setdefault(kind, {})[int(match.group(1))] = name
                 break
     for name, control in controls.items():
         gain = MIX_GAIN.match(name)
@@ -447,11 +465,13 @@ def routing_tables(controls: dict[str, dict[str, Any]]) -> dict[str, Any]:
         mixes.setdefault(ord(gain.group(1)) - ord("A") + 1, []).append(
             (source, None if db is None else round(db))
         )
-    return {"destinations": destinations, "dsp": dsp_inputs, "mixes": mixes}
+    return {"destinations": destinations, "names": names, "dsp": dsp_inputs, "mixes": mixes}
 
 
-def _chain(source: tuple[str, int], tables: dict[str, Any]) -> tuple:
+def _chain(source: tuple[str, int] | None, tables: dict[str, Any]) -> tuple:
     """Describe what feeds one destination channel, mixes expanded."""
+    if source is None:
+        return ("off",)
     if source[0] == "mix":
         return ("mix", source[1], tuple(sorted(tables["mixes"].get(source[1], []))))
     return ("src", source)
@@ -486,6 +506,8 @@ def _describe_run(chains: list[tuple]) -> dict[str, Any] | None:
     """Collapse a run of destination channels into one row, if they line up."""
     count = len(chains)
     if all(chain == chains[0] for chain in chains):
+        if chains[0][0] == "off":
+            return {"via": None, "sources": [], "off": True}
         if chains[0][0] == "src":
             return {"via": None, "sources": [(chains[0][1], 1, None)]}
         return {"via": ("mix", chains[0][1], 1), "sources": [(s, 1, db) for s, db in chains[0][2]]}
@@ -517,34 +539,128 @@ def _fold_sources(sources: list[tuple]) -> list[tuple]:
     return [((kind, index), span, db) for kind, index, span, db, _ in folded]
 
 
+def _plural(count: int, singular: str, plural: str) -> str:
+    return singular if count == 1 else plural
+
+
+def _numbers(first: int, count: int, kind: str = "") -> str:
+    return _index_label(kind, first) if count == 1 else f"{_index_label(kind, first)}–{_index_label(kind, first + count - 1)}"
+
+
+def source_hint(kind: str, first: int, count: int, dsp: bool = False) -> str:
+    numbers = _numbers(first, count, kind)
+    hints = {
+        "in": f"{_plural(count, 'Input', 'Inputs')} {numbers} on the interface",
+        "pc": f"Audio your computer plays on {_plural(count, 'channel', 'channels')} {numbers}",
+        "spdif": f"S/PDIF digital {_plural(count, 'input', 'inputs')} {numbers}",
+        "adat": f"ADAT optical {_plural(count, 'input', 'inputs')} {numbers}",
+        "dsp": f"DSP {_plural(count, 'channel', 'channels')} {numbers}",
+        "mix": f"Internal {_plural(count, 'mix', 'mixes')} {numbers}: blends its sources, each at its own level",
+    }
+    hint = hints.get(kind, "")
+    return hint + ", after the interface's input processing (DSP)" if dsp else hint
+
+
+def destination_hint(kind: str, first: int, count: int, label: str) -> str:
+    numbers = _numbers(first, count)
+    if label == "Phones":
+        return "Headphone output"
+    if label.startswith("Line"):
+        return f"Line {_plural(count, 'output', 'outputs')} {numbers}, usually your monitor speakers"
+    hints = {
+        "out": f"Analogue {_plural(count, 'output', 'outputs')} {numbers}",
+        "spdif": f"S/PDIF digital {_plural(count, 'output', 'outputs')} {numbers}",
+        "adat": f"ADAT optical {_plural(count, 'output', 'outputs')} {numbers}",
+        "rec": f"What applications record on {_plural(count, 'channel', 'channels')} {numbers}",
+    }
+    return hints[kind]
+
+
 def _source_chip(source: tuple[str, int], count: int, db: int | None, tables: dict[str, Any]) -> dict[str, Any]:
     kind, index = source
     label = source_text(kind, index, count)
+    hint = source_hint(kind, index, count)
     if kind == "dsp":
         # DSP channels are processed inputs; name them after what feeds them.
         feeds = [tables["dsp"].get(index + offset) for offset in range(count)]
         if feeds[0] and all(feed == (feeds[0][0], feeds[0][1] + offset) for offset, feed in enumerate(feeds)):
             label = source_text(feeds[0][0], feeds[0][1], count) + " (DSP)"
             kind = feeds[0][0]
-    return {"label": label, "kind": kind, "db": db}
+            hint = source_hint(kind, feeds[0][1], count, dsp=True)
+    if db not in (None, 0):
+        hint += f", mixed in at {'+' if db > 0 else '−'}{abs(db)} dB"
+    return {"label": label, "kind": kind, "db": db, "hint": hint}
+
+
+def item_label(kind: str, index: int) -> str:
+    """The ALSA enum item for a source, e.g. ('pc', 3) -> 'PCM 3'."""
+    return f"{ITEM_NAMES[kind]} {_index_label(kind, index)}"
+
+
+def _choice_label(kind: str, start: int, span: int, count: int, tables: dict[str, Any]) -> str:
+    label = source_text(kind, start, span) if kind == "mix" else _source_chip((kind, start), span, None, tables)["label"]
+    return label + " (mono)" if span == 1 and count > 1 else label
+
+
+def _choice(kind: str, start: int, span: int, count: int, tables: dict[str, Any]) -> dict[str, Any]:
+    # A DSP choice takes the icon of the input it processes, like its chip.
+    icon = _source_chip((kind, start), span, None, tables)["kind"] if kind != "mix" else "mix"
+    return {
+        "key": f"{kind}:{start}:{span}",
+        "label": _choice_label(kind, start, span, count, tables),
+        "kind": icon,
+        "group": CHOICE_GROUPS[kind],
+    }
+
+
+def route_choices(items: list[str], count: int, current: str, tables: dict[str, Any]) -> list[dict[str, Any]]:
+    """Sources a destination run can switch to: aligned groups of its width."""
+    available: dict[str, set[int]] = {}
+    for item in items:
+        source = parse_source(item)
+        if source:
+            available.setdefault(source[0], set()).add(source[1])
+    choices = []
+    for kind in CHOICE_ORDER:
+        indices = available.get(kind, set())
+        for start in range(1, max(indices, default=0) + 1, count):
+            if all(start + offset in indices for offset in range(count)):
+                choices.append(_choice(kind, start, count, count, tables))
+    choices.append({"key": "off", "label": "Off", "kind": "", "group": "Mixes" if "mix" in available else ""})
+    if current not in {choice["key"] for choice in choices}:
+        # A mono source shared across a pair, or an unaligned range.
+        kind, start, span = current.split(":")
+        choices.insert(0, _choice(kind, int(start), int(span), count, tables))
+    for choice in choices:
+        choice["current"] = choice["key"] == current
+    return choices
+
+
+def _current_choice(best: dict[str, Any], count: int) -> str:
+    if best.get("off"):
+        return "off"
+    if best["via"]:
+        _, mix, span = best["via"]
+        return f"mix:{mix}:{span}"
+    (kind, index), span, _ = best["sources"][0]
+    return f"{kind}:{index}:{span}"
 
 
 def routing_rows(controls: dict[str, dict[str, Any]], model: str = "") -> list[dict[str, Any]]:
     tables = routing_tables(controls)
     rows: list[dict[str, Any]] = []
     for kind in ("out", "spdif", "adat", "rec"):
-        channels = sorted(
-            (index, source) for index, source in tables["destinations"].get(kind, {}).items() if source
-        )
+        channels = sorted(tables["destinations"].get(kind, {}).items())
         position = 0
         while position < len(channels):
             # Grow the longest run of consecutive channels that still collapses
             # into one row: a stereo pair, a mono source on both sides, or a
             # bank of inputs recorded straight to the computer. Physical outputs
-            # stop at their odd/even pair so front-panel names stay visible.
+            # and unused channels stop at their odd/even pair so front-panel
+            # names stay visible and Off channels can be picked a pair at a time.
             first = channels[position][0]
             limit = len(channels) - position
-            if kind != "rec":
+            if kind != "rec" or channels[position][1] is None:
                 limit = min(limit, 2 if first % 2 else 1)
             best_length, best = 1, None
             for length in range(1, limit + 1):
@@ -560,16 +676,75 @@ def routing_rows(controls: dict[str, dict[str, Any]], model: str = "") -> list[d
             if best is None:
                 best = {"via": None, "sources": [(channels[position][1], 1, None)]}
             via = best["via"]
+            destination = destination_text(kind, first, best_length, model)
+            current = _current_choice(best, best_length)
+            items = controls[tables["names"][kind][first]].get("items") or []
             rows.append({
+                "key": f"{kind}:{first}:{best_length}",
                 "section": "record" if kind == "rec" else "hear",
-                "destination": destination_text(kind, first, best_length, model),
+                "kind": "phones" if destination == "Phones" else kind,
+                "destination": destination,
+                "destination_hint": destination_hint(kind, first, best_length, destination),
+                "off": bool(best.get("off")),
                 "via": source_text(*via) if via else "",
+                "via_hint": source_hint("mix", via[1], via[2]) if via else "",
                 "sources": [
                     _source_chip(source, count, db, tables) for source, count, db in _fold_sources(best["sources"])
                 ],
+                "same_as": "",
+                "current": current,
+                "choices": route_choices(items, best_length, current, tables) if items else [],
             })
             position += best_length
+    # A recording channel fed by the same mix as an output (Rec 5–6 and Phones
+    # on a 4th Gen) is shown once, then referred to.
+    seen: dict[str, str] = {}
+    for row in rows:
+        if not row["via"]:
+            continue
+        signature = json.dumps([row["via"], row["sources"]], sort_keys=True)
+        if signature in seen:
+            row["same_as"] = seen[signature]
+        else:
+            seen[signature] = row["destination"]
     return rows
+
+
+def set_route(row_key: str, choice_key: str) -> dict[str, Any]:
+    """Point a destination run at a new source; nothing is written unless
+    every channel accepts it."""
+    row, choice = ROW_KEY.match(str(row_key)), CHOICE_KEY.match(str(choice_key))
+    if not row or not choice:
+        raise MonitorError("Unknown route")
+    kind, first, count = row.group(1), int(row.group(2)), int(row.group(3))
+    card = require_card()
+    controls = read_controls(card)
+    tables = routing_tables(controls)
+    names = tables["names"].get(kind, {})
+    targets = [names.get(first + offset) for offset in range(count)] if 1 <= count <= 64 else []
+    if not targets or not all(targets):
+        raise MonitorError("That output is not available on this interface")
+    if choice_key == "off":
+        labels, chosen = ["Off"] * count, "Off"
+    else:
+        source, start, span = choice.group(1), int(choice.group(2)), int(choice.group(3))
+        if span not in (1, count):
+            raise MonitorError("Unknown route")
+        labels = [item_label(source, start + (offset if span == count else 0)) for offset in range(count)]
+        chosen = _choice_label(source, start, span, count, tables)
+    commands = []
+    for name, label in zip(targets, labels):
+        control = controls[name]
+        if label not in control["items"]:
+            raise MonitorError(f"{label} cannot be routed there on this interface")
+        target = f"numid={control['numid']}" if control.get("numid") else f"name={name}"
+        commands.append(["amixer", "-q", "-c", card, "cset", target, str(control["items"].index(label))])
+    for command in commands:
+        run(command)
+    result = status()
+    destination = destination_text(kind, first, count, model_name(card))
+    result["notice"] = f"{destination} is now off" if choice_key == "off" else f"{destination} now plays {chosen}"
+    return result
 
 
 def routing_signature(controls: dict[str, dict[str, Any]]) -> dict[str, str]:
@@ -645,7 +820,15 @@ def save_preset(name: str) -> dict[str, Any]:
         raise MonitorError(f"A preset named '{path.stem}' already exists")
     path.parent.mkdir(parents=True, exist_ok=True)
     run(["alsactl", "-f", str(path), "store", card])
-    return status()
+    return dict(status(), notice=f"Saved {path.stem}")
+
+
+def delete_preset(name: str) -> dict[str, Any]:
+    path = preset_path(name)
+    if not path.is_file():
+        raise MonitorError(f"Preset '{path.stem}' was not found")
+    path.unlink()
+    return dict(status(), notice=f"Deleted {path.stem}")
 
 
 def apply_preset(name: str) -> dict[str, Any]:
@@ -673,7 +856,7 @@ def apply_preset(name: str) -> dict[str, Any]:
         run(["alsactl", "-I", "-f", temporary, "restore", card])
     finally:
         os.unlink(temporary)
-    return status()
+    return dict(status(), notice=f"Applied {path.stem}")
 
 
 # --- Commands ----------------------------------------------------------------
@@ -706,6 +889,7 @@ def status() -> dict[str, Any]:
         "routing": rows,
         "presets": presets,
         "presets_dir": str(presets_dir()),
+        "routing_view": load_config()["routing_view"],
         "mixer_app_installed": shutil.which(MIXER_APP) is not None,
         "mixer_app_installable": shutil.which("omarchy-pkg-add") is not None,
         "message": "" if mic else "Connect a Scarlett interface to control its microphone.",
@@ -762,9 +946,17 @@ def dispatch(arguments: list[str]) -> dict[str, Any]:
         return apply_preset(arguments[1])
     if command == "preset-save" and len(arguments) == 2:
         return save_preset(arguments[1])
+    if command == "preset-delete" and len(arguments) == 2:
+        return delete_preset(arguments[1])
+    if command == "route-set" and len(arguments) == 3:
+        return set_route(arguments[1], arguments[2])
+    if command == "routing-view" and len(arguments) == 2 and arguments[1] in ROUTING_VIEWS:
+        config["routing_view"] = arguments[1]
+        save_config(config)
+        return status()
     raise MonitorError(
         "Usage: scarlett_monitor.py [status|mic-toggle|monitor-toggle|monitor-volume PERCENT"
-        "|preset-apply NAME|preset-save NAME]"
+        "|preset-apply NAME|preset-save NAME|preset-delete NAME|route-set ROW CHOICE|routing-view compact|all]"
     )
 
 
